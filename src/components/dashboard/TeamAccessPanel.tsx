@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useCallback } from 'react';
+import { useAuth } from '../../context/AuthContext';
 import {
   ALL_PERMISSIONS,
   AccessStatus,
@@ -13,6 +14,7 @@ import {
 } from '../../types/rbac';
 import {
   AdminUserRecord,
+  CreateCeoInvitationResponse,
   TeamInvitationRecord,
   createCeoTeamInvitation,
   fetchTeamDirectory,
@@ -31,6 +33,8 @@ import {
   RefreshCw,
   Mail,
   Clock,
+  Copy,
+  Check,
   X,
 } from 'lucide-react';
 
@@ -51,10 +55,20 @@ function formatDateLabel(iso: string | null | undefined): string {
   }).format(new Date(ms));
 }
 
+function buildTeammateSignupUrl(email: string, fullName?: string | null): string {
+  if (typeof window === 'undefined') return '/login';
+  const params = new URLSearchParams({ invite: email });
+  if (fullName?.trim()) {
+    params.set('name', fullName.trim());
+  }
+  return `${window.location.origin}/login?${params.toString()}`;
+}
+
 export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) => {
+  const { isCeo } = useAuth();
+
   const [members, setMembers] = useState<AdminUserRecord[]>([]);
   const [invitations, setInvitations] = useState<TeamInvitationRecord[]>([]);
-  const [authInviteSupported, setAuthInviteSupported] = useState(false);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
 
@@ -68,6 +82,10 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
   ]);
   const [requireManualApproval, setRequireManualApproval] = useState(false);
   const [inviting, setInviting] = useState(false);
+  const [inviteFormError, setInviteFormError] = useState<string | null>(null);
+  const [savedInviteSummary, setSavedInviteSummary] =
+    useState<CreateCeoInvitationResponse | null>(null);
+  const [copiedLinkId, setCopiedLinkId] = useState<string | null>(null);
 
   // Edit / Approve Member Modal State
   const [editingMember, setEditingMember] = useState<AdminUserRecord | null>(null);
@@ -87,24 +105,56 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
       const data = await fetchTeamDirectory();
       setMembers(data.members);
       setInvitations(data.invitations);
-      setAuthInviteSupported(data.authInviteSupported);
     } catch (err: unknown) {
-      setLoadError(err instanceof Error ? err.message : 'Unable to load Team Access directory.');
+      setLoadError(
+        err instanceof Error ? err.message : 'Unable to load Team Access directory.'
+      );
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    if (!isCeo) {
+      setLoading(false);
+      return;
+    }
     void loadDirectory(true);
-  }, [loadDirectory]);
+  }, [isCeo, loadDirectory]);
+
+  if (!isCeo) {
+    return (
+      <div className="p-8 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-center space-y-2">
+        <AlertCircle className="w-7 h-7 text-rose-400 mx-auto" />
+        <h3 className="font-display font-bold text-lg text-white">CEO Access Required</h3>
+        <p className="text-xs font-mono text-rose-200">
+          Only the verified CEO / Owner account can view or manage team invitations and roles.
+        </p>
+      </div>
+    );
+  }
+
+  const handleCopySignupLink = async (key: string, email: string, fullName?: string | null) => {
+    const url = buildTeammateSignupUrl(email, fullName);
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedLinkId(key);
+      window.setTimeout(() => {
+        setCopiedLinkId((prev) => (prev === key ? null : prev));
+      }, 2500);
+    } catch {
+      onNotify('error', `Unable to copy automatically. Share this URL: ${url}`);
+    }
+  };
 
   const handleSelectInviteRole = (nextRole: DelegatableRole) => {
     setInviteRole(nextRole);
     setInvitePermissions([...ROLE_RECOMMENDED_DEFAULTS[nextRole]]);
+    setInviteFormError(null);
   };
 
   const toggleInvitePermission = (perm: PermissionKey) => {
+    setInviteFormError(null);
     setInvitePermissions((prev) =>
       prev.includes(perm) ? prev.filter((p) => p !== perm) : [...prev, perm]
     );
@@ -113,6 +163,9 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
   const handleCreateInvitation = async (e: React.FormEvent) => {
     e.preventDefault();
     if (inviting) return;
+
+    setInviteFormError(null);
+    setSavedInviteSummary(null);
     setInviting(true);
 
     try {
@@ -124,18 +177,32 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
         require_manual_approval: requireManualApproval,
       });
 
+      // Only show success after verifying a persisted invitation ID was returned from public.team_invitations
+      if (!result?.invitation?.id) {
+        throw new Error(
+          'Invitation could not be verified in public.team_invitations.'
+        );
+      }
+
       setInviteEmail('');
       setInviteName('');
+      setRequireManualApproval(false);
       setIsInviteOpen(false);
-      onNotify(
-        'success',
-        result.authEmailDispatched
-          ? `Invitation email dispatched and permissions recorded for ${result.invitation.email}.`
-          : `Pre-authorized invitation recorded for ${result.invitation.email}. Once they register and verify their email at /login, these permissions apply automatically.`
-      );
+      setSavedInviteSummary(result);
+
+      const successMessage = result.memberActivatedImmediately
+        ? `Invitation saved to team_invitations and ${ROLE_LABELS[result.invitation.role]} permissions activated immediately for ${result.invitation.email}.`
+        : result.authEmailDispatched
+        ? `Invitation saved to team_invitations and Supabase setup email sent to ${result.invitation.email}.`
+        : `Invitation saved to team_invitations for ${result.invitation.email} (${ROLE_LABELS[result.invitation.role]}).`;
+
+      onNotify('success', successMessage);
       await loadDirectory(false);
     } catch (err: unknown) {
-      onNotify('error', err instanceof Error ? err.message : 'Failed to create invitation.');
+      const realError =
+        err instanceof Error ? err.message : 'Failed to save teammate invitation.';
+      setInviteFormError(realError);
+      onNotify('error', realError);
     } finally {
       setInviting(false);
     }
@@ -151,7 +218,13 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
         : member.role;
 
     setEditRole(initialRole);
-    setEditStatus(approvingPending ? 'active' : member.access_status === 'pending' ? 'active' : member.access_status);
+    setEditStatus(
+      approvingPending
+        ? 'active'
+        : member.access_status === 'pending'
+        ? 'active'
+        : member.access_status
+    );
 
     if (member.permissions.length > 0 && member.role !== 'none') {
       setEditPermissions(sanitizePermissionsForRole(initialRole, member.permissions));
@@ -258,6 +331,9 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
   const handleCancelInvitation = async (inv: TeamInvitationRecord) => {
     try {
       await revokeCeoTeamInvitation(inv.id);
+      if (savedInviteSummary?.invitation.id === inv.id) {
+        setSavedInviteSummary(null);
+      }
       onNotify('success', `Revoked pending invitation for ${inv.email}.`);
       await loadDirectory(false);
     } catch (err: unknown) {
@@ -298,7 +374,10 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
 
           <button
             type="button"
-            onClick={() => setIsInviteOpen((prev) => !prev)}
+            onClick={() => {
+              setInviteFormError(null);
+              setIsInviteOpen((prev) => !prev);
+            }}
             className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-slate-950 font-bold text-xs font-mono uppercase tracking-wider hover:opacity-95 shadow-md shadow-cyan-500/20"
           >
             <UserPlus className="w-4 h-4" />
@@ -307,7 +386,7 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
         </div>
       </div>
 
-      {/* Metrics & Delivery Status */}
+      {/* Metrics */}
       <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
         <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800">
           <div className="text-xs font-mono text-slate-400">Active Authorized Users</div>
@@ -322,23 +401,79 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
           </div>
         </div>
         <div className="bg-slate-900/60 p-4 rounded-xl border border-slate-800">
-          <div className="text-xs font-mono text-slate-400">Pending Email Invitations</div>
+          <div className="text-xs font-mono text-slate-400">Pending Invitations</div>
           <div className="font-display font-bold text-2xl text-cyan-300 mt-1 tabular-nums">
             {pendingInvitations.length}
           </div>
         </div>
       </div>
 
-      <div className="p-3.5 rounded-xl bg-slate-900/50 border border-slate-800 text-xs font-mono text-slate-300 flex flex-wrap items-center justify-between gap-2">
-        <div className="flex items-center gap-2">
-          <ShieldCheck className="w-4 h-4 text-cyan-400 shrink-0" />
-          <span>
-            {authInviteSupported
-              ? 'Server Admin Invite Dispatch Active: Invitations automatically send Supabase Auth setup emails.'
-              : 'Database Pre-Authorization Mode: Invitations record verified email permissions in PostgreSQL; teammates can also register at /login for CEO approval.'}
-          </span>
+      {/* Verified Saved Invitation Confirmation Banner */}
+      {savedInviteSummary && (
+        <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 space-y-3">
+          <div className="flex items-start justify-between gap-3">
+            <div className="flex items-start gap-2.5 text-xs font-mono text-emerald-200">
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0 mt-0.5" />
+              <div className="space-y-1">
+                <div className="font-bold text-white">
+                  Invitation Saved for {savedInviteSummary.invitation.email} (
+                  {ROLE_LABELS[savedInviteSummary.invitation.role]})
+                </div>
+                <p className="text-emerald-200/90 leading-relaxed">
+                  {savedInviteSummary.memberActivatedImmediately
+                    ? 'This email already has a registered account—their assigned role and permissions are now active immediately.'
+                    : savedInviteSummary.authEmailDispatched
+                    ? 'Invitation recorded in public.team_invitations and a Supabase setup email has been sent.'
+                    : 'Invitation recorded in public.team_invitations. Share the signup link below with your teammate—once they register and confirm their email at /login, these permissions activate automatically.'}
+                </p>
+              </div>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSavedInviteSummary(null)}
+              className="text-slate-400 hover:text-white"
+              aria-label="Dismiss invitation confirmation"
+            >
+              <X className="w-4 h-4" />
+            </button>
+          </div>
+
+          {!savedInviteSummary.memberActivatedImmediately &&
+            !savedInviteSummary.authEmailDispatched && (
+              <div className="flex flex-wrap items-center justify-between gap-2 bg-slate-950/80 border border-slate-800 rounded-xl px-3.5 py-2 text-xs font-mono">
+                <span className="text-cyan-300 truncate">
+                  {buildTeammateSignupUrl(
+                    savedInviteSummary.invitation.email,
+                    savedInviteSummary.invitation.full_name
+                  )}
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    void handleCopySignupLink(
+                      `summary-${savedInviteSummary.invitation.id}`,
+                      savedInviteSummary.invitation.email,
+                      savedInviteSummary.invitation.full_name
+                    )
+                  }
+                  className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-cyan-500/20 hover:bg-cyan-500/30 border border-cyan-500/40 text-cyan-200 font-semibold shrink-0"
+                >
+                  {copiedLinkId === `summary-${savedInviteSummary.invitation.id}` ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>Copied</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>Copy Signup Link</span>
+                    </>
+                  )}
+                </button>
+              </div>
+            )}
         </div>
-      </div>
+      )}
 
       {/* Invite Teammate Drawer */}
       {isInviteOpen && (
@@ -357,12 +492,22 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
             </div>
             <button
               type="button"
-              onClick={() => setIsInviteOpen(false)}
+              onClick={() => {
+                setInviteFormError(null);
+                setIsInviteOpen(false);
+              }}
               className="p-1.5 rounded-lg bg-slate-800 text-slate-400 hover:text-white"
             >
               <X className="w-4 h-4" />
             </button>
           </div>
+
+          {inviteFormError && (
+            <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 flex items-start gap-2.5 text-xs font-mono text-rose-200">
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+              <span>{inviteFormError}</span>
+            </div>
+          )}
 
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
             <div>
@@ -373,7 +518,10 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
                 type="email"
                 required
                 value={inviteEmail}
-                onChange={(e) => setInviteEmail(e.target.value)}
+                onChange={(e) => {
+                  setInviteEmail(e.target.value);
+                  if (inviteFormError) setInviteFormError(null);
+                }}
                 placeholder="teammate@campus.edu"
                 className="w-full bg-slate-950 border border-slate-800 rounded-xl px-3.5 py-2.5 text-xs text-white focus:outline-none focus:border-cyan-500"
               />
@@ -463,7 +611,10 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
           <div className="flex justify-end gap-3 pt-2 border-t border-slate-800">
             <button
               type="button"
-              onClick={() => setIsInviteOpen(false)}
+              onClick={() => {
+                setInviteFormError(null);
+                setIsInviteOpen(false);
+              }}
               className="px-4 py-2 rounded-xl bg-slate-800 text-slate-300 text-xs font-mono"
             >
               Cancel
@@ -473,7 +624,7 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
               disabled={inviting}
               className="px-5 py-2 rounded-xl bg-gradient-to-r from-cyan-500 to-blue-600 text-slate-950 font-bold text-xs font-mono uppercase tracking-wider disabled:opacity-50"
             >
-              {inviting ? 'Sending Invitation...' : 'Authorize & Invite'}
+              {inviting ? 'Saving Invitation...' : 'Authorize & Invite'}
             </button>
           </div>
         </form>
@@ -487,6 +638,14 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
         <div className="p-8 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-center space-y-3">
           <AlertCircle className="w-7 h-7 text-rose-400 mx-auto" />
           <p className="text-xs font-mono text-rose-200">{loadError}</p>
+          <button
+            type="button"
+            onClick={() => void loadDirectory(true)}
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300"
+          >
+            <RefreshCw className="w-3.5 h-3.5" />
+            <span>Retry</span>
+          </button>
         </div>
       ) : (
         <>
@@ -541,12 +700,12 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
             </div>
           )}
 
-          {/* Pending Email Invitations */}
+          {/* Pending Invitations */}
           {pendingInvitations.length > 0 && (
             <div className="space-y-3">
               <h3 className="font-display font-bold text-lg text-white flex items-center gap-2">
                 <Mail className="w-4 h-4 text-cyan-400" />
-                <span>Pending Email Invitations ({pendingInvitations.length})</span>
+                <span>Pending Invitations ({pendingInvitations.length})</span>
               </h3>
               <div className="space-y-2.5">
                 {pendingInvitations.map((inv) => (
@@ -569,13 +728,35 @@ export const TeamAccessPanel: React.FC<TeamAccessPanelProps> = ({ onNotify }) =>
                       </div>
                     </div>
 
-                    <button
-                      type="button"
-                      onClick={() => void handleCancelInvitation(inv)}
-                      className="self-start sm:self-center px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-rose-950/40 border border-slate-800 text-rose-400 text-xs font-mono"
-                    >
-                      Revoke Invite
-                    </button>
+                    <div className="flex flex-wrap items-center gap-2 self-start sm:self-center">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void handleCopySignupLink(inv.id, inv.email, inv.full_name)
+                        }
+                        className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-slate-800 border border-slate-800 text-cyan-300 text-xs font-mono"
+                      >
+                        {copiedLinkId === inv.id ? (
+                          <>
+                            <Check className="w-3.5 h-3.5 text-emerald-400" />
+                            <span>Copied Link</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="w-3.5 h-3.5" />
+                            <span>Copy Signup Link</span>
+                          </>
+                        )}
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleCancelInvitation(inv)}
+                        className="px-3 py-1.5 rounded-lg bg-slate-950 hover:bg-rose-950/40 border border-slate-800 text-rose-400 text-xs font-mono"
+                      >
+                        Revoke Invite
+                      </button>
+                    </div>
                   </div>
                 ))}
               </div>

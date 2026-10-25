@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { BrandLogo } from '../brand/BrandLogo';
 import { useAuth } from '../../context/AuthContext';
 import {
@@ -58,6 +58,18 @@ export const AuthModal: React.FC<AuthModalProps> = ({
   const [infoMessage, setInfoMessage] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    const params = new URLSearchParams(window.location.search);
+    const invitedEmail = params.get('invite')?.trim();
+    const invitedName = params.get('name')?.trim();
+    if (invitedEmail) {
+      setEmail(invitedEmail.toLowerCase());
+      if (invitedName) setFullName(invitedName);
+      setMode('register');
+    }
+  }, [isOpen]);
+
   if (variant === 'modal' && !isOpen) return null;
 
   const handleSignInSubmit = async (e: React.FormEvent) => {
@@ -97,6 +109,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         password,
       });
       setPassword('');
+      if (res.grantedImmediateAccess) {
+        if (onSuccess) onSuccess();
+        if (variant === 'modal') onClose();
+        return;
+      }
       setInfoMessage(res.message);
       if (res.requiresEmailConfirmation) {
         setMode('signin');

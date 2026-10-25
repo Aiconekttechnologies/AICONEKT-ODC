@@ -59,7 +59,11 @@ interface AuthContextType {
     fullName: string;
     email: string;
     password: string;
-  }) => Promise<{ requiresEmailConfirmation: boolean; message: string }>;
+  }) => Promise<{
+    requiresEmailConfirmation: boolean;
+    grantedImmediateAccess: boolean;
+    message: string;
+  }>;
   completePasswordSetup: (newPassword: string) => Promise<void>;
   logout: () => Promise<void>;
   refreshUser: () => Promise<void>;
@@ -364,7 +368,11 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     fullName: string;
     email: string;
     password: string;
-  }): Promise<{ requiresEmailConfirmation: boolean; message: string }> => {
+  }): Promise<{
+    requiresEmailConfirmation: boolean;
+    grantedImmediateAccess: boolean;
+    message: string;
+  }> => {
     setAuthError(null);
 
     if (!isSupabaseConfigured || !supabase) {
@@ -405,9 +413,17 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
     }
 
     if (data.session) {
-      await hydrateFromSession(data.session);
+      const profile = await hydrateFromSession(data.session);
+      if (profile?.hasDashboardAccess) {
+        return {
+          requiresEmailConfirmation: false,
+          grantedImmediateAccess: true,
+          message: `Invitation verified. Signed in with ${profile.roleLabel} permissions.`,
+        };
+      }
       return {
         requiresEmailConfirmation: false,
+        grantedImmediateAccess: false,
         message:
           'Account registered with zero default privileges. Your request is now queued for CEO review and role assignment.',
       };
@@ -415,8 +431,9 @@ export const AuthProvider: React.FC<{ children: ReactNode }> = ({ children }) =>
 
     return {
       requiresEmailConfirmation: true,
+      grantedImmediateAccess: false,
       message:
-        'Verification email sent. Confirm your email address—once verified, the CEO can review and approve your dashboard access.',
+        'Verification email sent. Confirm your email address—if you have a pending CEO invitation, your permissions will activate automatically upon verification.',
     };
   };
 

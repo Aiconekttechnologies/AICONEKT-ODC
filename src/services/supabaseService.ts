@@ -3,6 +3,7 @@ import {
   AccessStatus,
   DashboardRole,
   DelegatableRole,
+  OFFICIAL_CEO_EMAIL,
   PermissionKey,
   sanitizePermissionsForRole,
 } from '../types/rbac';
@@ -77,6 +78,7 @@ export interface TeamInvitationRecord {
   require_manual_approval: boolean;
   status: 'pending' | 'accepted' | 'revoked' | 'expired';
   invited_by: string | null;
+  accepted_user_id?: string | null;
   expires_at: string;
   created_at: string;
 }
@@ -205,8 +207,15 @@ export function translateSupabaseError(err: any, fallbackMessage: string): AppSe
   }
 
   if (code === '23505' || lower.includes('duplicate key')) {
+    if (lower.includes('idx_team_invitations_pending_email')) {
+      return new AppServiceError(
+        'A pending invitation already exists for this email address. Revoke the existing invitation first if you want to issue a new one.',
+        'duplicate',
+        code
+      );
+    }
     return new AppServiceError(
-      'A record with this unique identifier or pending email invitation already exists.',
+      rawMessage || 'A duplicate record already exists.',
       'duplicate',
       code
     );
@@ -497,27 +506,64 @@ export async function fetchTeamDirectory(): Promise<TeamDirectoryResponse> {
   };
 }
 
+const ALLOWED_INVITE_ROLES: DelegatableRole[] = [
+  'admin',
+  'project_editor',
+  'event_manager',
+  'viewer',
+];
+
+export interface CreateCeoInvitationResponse {
+  invitation: TeamInvitationRecord;
+  authEmailDispatched: boolean;
+  memberActivatedImmediately: boolean;
+}
+
 export async function createCeoTeamInvitation(input: {
   email: string;
   full_name?: string;
   role: DelegatableRole;
   permissions: PermissionKey[];
   require_manual_approval?: boolean;
-}): Promise<{ invitation: TeamInvitationRecord; authEmailDispatched: boolean }> {
+}): Promise<CreateCeoInvitationResponse> {
   const email = input.email.trim().toLowerCase();
   if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) {
     throw new AppServiceError('Please enter a valid teammate email address.', 'validation');
   }
 
-  const sanitizedPerms = sanitizePermissionsForRole(input.role, input.permissions);
-  if (sanitizedPerms.length === 0) {
+  if (email === OFFICIAL_CEO_EMAIL) {
     throw new AppServiceError(
-      'Grant at least one permission before sending an invitation.',
+      'The CEO owner email does not require a team invitation.',
       'validation'
     );
   }
 
-  const token = await getActiveSessionToken();
+  if (!ALLOWED_INVITE_ROLES.includes(input.role)) {
+    throw new AppServiceError(
+      'Select a valid restricted role: Admin, Project Editor, Event Manager, or Viewer.',
+      'validation'
+    );
+  }
+
+  const sanitizedPerms = sanitizePermissionsForRole(input.role, input.permissions);
+  if (sanitizedPerms.length === 0) {
+    throw new AppServiceError(
+      'Select at least one permission to grant for this invitation.',
+      'validation'
+    );
+  }
+
+  const client = requireClient();
+  const { data: sessionData, error: sessionErr } = await client.auth.getSession();
+  if (sessionErr || !sessionData.session?.access_token || !sessionData.session.user?.id) {
+    throw new AppServiceError(
+      'Your session has expired. Please sign in again.',
+      'session_expired'
+    );
+  }
+
+  const token = sessionData.session.access_token;
+  const callerUserId = sessionData.session.user.id;
   const redirectTo =
     typeof window !== 'undefined' ? `${window.location.origin}/login` : undefined;
 
@@ -540,25 +586,93 @@ export async function createCeoTeamInvitation(input: {
 
     if (res.ok) {
       const json = await res.json();
+      if (!json?.invitation?.id) {
+        throw new AppServiceError(
+          'Server response did not include a saved invitation record.',
+          'database'
+        );
+      }
       return {
         invitation: json.invitation as TeamInvitationRecord,
         authEmailDispatched: Boolean(json.authEmailDispatched),
+        memberActivatedImmediately: Boolean(json.memberActivatedImmediately),
       };
     }
 
     if (res.status !== 503 && res.status !== 404) {
       const errBody = await res.json().catch(() => ({}));
       throw new AppServiceError(
-        errBody.error || 'Failed to invite teammate.',
-        res.status === 403 ? 'permission_denied' : 'validation'
+        errBody.error || `Failed to save team invitation (HTTP ${res.status}).`,
+        res.status === 401
+          ? 'session_expired'
+          : res.status === 403
+          ? 'permission_denied'
+          : 'validation'
       );
     }
   } catch (err) {
     if (err instanceof AppServiceError) throw err;
   }
 
-  // Direct PostgreSQL RLS fallback (CEO-only policy)
-  const client = requireClient();
+  // Direct PostgreSQL RLS fallback (for static deployments without Express; strictly enforced by public.is_ceo())
+  const callerRecord = await fetchCurrentAdminRecord(callerUserId);
+  if (
+    !callerRecord ||
+    callerRecord.role !== 'owner' ||
+    callerRecord.access_status !== 'active' ||
+    !callerRecord.is_active
+  ) {
+    throw new AppServiceError(
+      'Forbidden. Only the verified active CEO / Owner account can invite teammates.',
+      'permission_denied'
+    );
+  }
+
+  const { data: existingMember, error: memberCheckErr } = await client
+    .from('admin_users')
+    .select('*')
+    .eq('email', email)
+    .maybeSingle();
+
+  if (memberCheckErr) {
+    throw translateSupabaseError(memberCheckErr, 'Failed to check existing team directory.');
+  }
+  if (existingMember?.role === 'owner') {
+    throw new AppServiceError('This email belongs to the CEO owner account.', 'validation');
+  }
+
+  const { data: existingPending, error: pendingCheckErr } = await client
+    .from('team_invitations')
+    .select('*')
+    .eq('email', email)
+    .eq('status', 'pending')
+    .maybeSingle();
+
+  if (pendingCheckErr) {
+    throw translateSupabaseError(pendingCheckErr, 'Failed to check pending invitations.');
+  }
+
+  if (existingPending) {
+    const expMs = Date.parse(existingPending.expires_at);
+    if (!Number.isNaN(expMs) && expMs <= Date.now()) {
+      const { error: expireErr } = await client
+        .from('team_invitations')
+        .update({ status: 'expired' })
+        .eq('id', existingPending.id);
+      if (expireErr) {
+        throw translateSupabaseError(expireErr, 'Failed to expire previous invitation.');
+      }
+    } else {
+      throw new AppServiceError(
+        `A pending invitation already exists for ${email}. Revoke the existing invitation first if you want to issue a new one.`,
+        'duplicate'
+      );
+    }
+  }
+
+  const requireManual = Boolean(input.require_manual_approval);
+  const shouldActivateNow = Boolean(existingMember && !requireManual);
+
   const { data, error } = await client
     .from('team_invitations')
     .insert({
@@ -566,19 +680,53 @@ export async function createCeoTeamInvitation(input: {
       full_name: input.full_name?.trim() || null,
       role: input.role,
       permissions: sanitizedPerms,
-      require_manual_approval: Boolean(input.require_manual_approval),
-      status: 'pending',
+      require_manual_approval: requireManual,
+      status: shouldActivateNow ? 'accepted' : 'pending',
+      invited_by: callerUserId,
+      ...(shouldActivateNow && existingMember
+        ? { accepted_user_id: existingMember.user_id }
+        : {}),
     })
     .select('*')
     .single();
 
-  if (error) {
-    throw translateSupabaseError(error, 'Failed to record team invitation.');
+  if (error || !data?.id) {
+    throw translateSupabaseError(
+      error || new Error('Invitation was not persisted to public.team_invitations.'),
+      'Failed to save team invitation to public.team_invitations.'
+    );
+  }
+
+  let memberActivatedImmediately = false;
+  if (existingMember) {
+    const nextActive = !requireManual;
+    const { error: updateErr } = await client
+      .from('admin_users')
+      .update({
+        role: input.role,
+        access_status: nextActive ? 'active' : 'pending',
+        is_active: nextActive,
+        permissions: sanitizedPerms,
+        invited_by: callerUserId,
+        ...(nextActive
+          ? { approved_by: callerUserId, approved_at: new Date().toISOString() }
+          : {}),
+      })
+      .eq('user_id', existingMember.user_id);
+
+    if (updateErr) {
+      throw translateSupabaseError(
+        updateErr,
+        'Invitation was recorded, but updating existing member permissions failed.'
+      );
+    }
+    memberActivatedImmediately = nextActive;
   }
 
   return {
     invitation: data as TeamInvitationRecord,
     authEmailDispatched: false,
+    memberActivatedImmediately,
   };
 }
 

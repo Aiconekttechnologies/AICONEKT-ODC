@@ -18,6 +18,7 @@ import {
   ServerInvitationRow,
   createAdminAccessRouter,
 } from '../server/routes/adminAccess.js';
+import { isValidServiceRoleKey } from '../server/lib/supabaseAdmin.js';
 
 dotenv.config();
 
@@ -30,8 +31,36 @@ function assert(condition: unknown, message: string): asserts condition {
   }
 }
 
+function makeFakeJwt(payload: Record<string, unknown>): string {
+  const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+  const body = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  return `${header}.${body}.fakesignature1234567890`;
+}
+
 async function runPrivilegeEscalationSuite() {
-  console.log('\n[4/6] Running RBAC & Privilege-Escalation Security Tests...');
+  console.log('\n[4/6] Running RBAC, Service-Key Hygiene & Invitation Lifecycle Security Tests...');
+
+  // 0. Service-Role Key Validation Regression Tests (prevents sb_publishable_* or anon JWT masquerading as service_role)
+  assert(
+    isValidServiceRoleKey('sb_publishable_abcdefghijklmnopqrstuvwxyz123456') === false,
+    'Publishable key (sb_publishable_*) must NEVER be accepted as SUPABASE_SERVICE_ROLE_KEY.'
+  );
+  assert(
+    isValidServiceRoleKey(makeFakeJwt({ role: 'anon', iss: 'supabase' })) === false,
+    'Anon JWT (role=anon) must NEVER be accepted as SUPABASE_SERVICE_ROLE_KEY.'
+  );
+  assert(
+    isValidServiceRoleKey('your-service-role-key-placeholder-value') === false,
+    'Placeholder service role key must be rejected.'
+  );
+  assert(
+    isValidServiceRoleKey('sb_secret_abcdefghijklmnopqrstuvwxyz123456') === true,
+    'Valid sb_secret_* key must be accepted.'
+  );
+  assert(
+    isValidServiceRoleKey(makeFakeJwt({ role: 'service_role', iss: 'supabase' })) === true,
+    'Valid service_role JWT must be accepted.'
+  );
 
   // A. Pure RBAC Matrix & Least-Privilege Ceiling Tests
   const allKeys = ALL_PERMISSIONS.map((p) => p.key);
@@ -109,6 +138,7 @@ async function runPrivilegeEscalationSuite() {
   const BOOTSTRAP_SECRET = 'test-bootstrap-secret-9f8a7b6c5d4e';
   const dbMembers = new Map<string, ServerAccessMemberRow>();
   const dbInvitations = new Map<string, ServerInvitationRow>();
+  let simulatedServiceRoleEnabled = true;
 
   // Seed simulated auth tokens -> identities
   const tokenIdentities: Record<string, { id: string; email: string }> = {
@@ -181,7 +211,7 @@ async function runPrivilegeEscalationSuite() {
 
   const mockDeps: AdminAccessDependencies = {
     isConfigured: () => true,
-    hasServiceRole: () => true,
+    hasServiceRole: () => simulatedServiceRoleEnabled,
     getBootstrapSecret: () => BOOTSTRAP_SECRET,
     verifyCaller: async (token) => tokenIdentities[token] || null,
     getAccessRecord: async (userId) => dbMembers.get(userId) || null,
@@ -206,20 +236,62 @@ async function runPrivilegeEscalationSuite() {
       invitations: Array.from(dbInvitations.values()),
     }),
     createInvitation: async (ceoUserId, _token, input) => {
+      const normalizedEmail = input.email.trim().toLowerCase();
+      const existingMember = Array.from(dbMembers.values()).find(
+        (m) => m.email.toLowerCase() === normalizedEmail
+      );
+
+      if (existingMember?.role === 'owner') {
+        throw new Error('This email belongs to the CEO owner account.');
+      }
+
+      const existingPending = Array.from(dbInvitations.values()).find(
+        (i) => i.email === normalizedEmail && i.status === 'pending'
+      );
+      if (existingPending) {
+        if (Date.parse(existingPending.expires_at) <= Date.now()) {
+          dbInvitations.set(existingPending.id, { ...existingPending, status: 'expired' });
+        } else {
+          throw new Error(
+            `A pending invitation already exists for ${normalizedEmail}. Revoke the existing invitation first if you want to issue a new one.`
+          );
+        }
+      }
+
+      const activateNow = Boolean(existingMember && !input.require_manual_approval);
       const inv: ServerInvitationRow = {
         id: `inv-${dbInvitations.size + 1}`,
-        email: input.email,
+        email: normalizedEmail,
         full_name: input.full_name,
         role: input.role,
         permissions: input.permissions,
         require_manual_approval: input.require_manual_approval,
-        status: 'pending',
+        status: activateNow ? 'accepted' : 'pending',
         invited_by: ceoUserId,
+        ...(activateNow && existingMember ? { accepted_user_id: existingMember.user_id } : {}),
         expires_at: new Date(Date.now() + 7 * 86400000).toISOString(),
         created_at: new Date().toISOString(),
       };
       dbInvitations.set(inv.id, inv);
-      return { invitation: inv, authEmailDispatched: true };
+
+      if (existingMember) {
+        dbMembers.set(existingMember.user_id, {
+          ...existingMember,
+          role: input.role,
+          access_status: activateNow ? 'active' : 'pending',
+          is_active: activateNow,
+          permissions: input.permissions,
+          invited_by: ceoUserId,
+          approved_by: activateNow ? ceoUserId : existingMember.approved_by,
+          approved_at: activateNow ? new Date().toISOString() : existingMember.approved_at,
+        });
+      }
+
+      return {
+        invitation: inv,
+        authEmailDispatched: Boolean(!existingMember && simulatedServiceRoleEnabled),
+        memberActivatedImmediately: activateNow,
+      };
     },
     updateMemberAccess: async (ceoUserId, _token, targetUserId, updates) => {
       const existing = dbMembers.get(targetUserId);
@@ -365,11 +437,28 @@ async function runPrivilegeEscalationSuite() {
       `Expected 409 on replay of one-time CEO bootstrap, got ${replayBootstrap.status}`
     );
 
-    // Test 5: Verified CEO can view directory, invite with restricted role, approve pending user, and CANNOT create a second 'owner' or suspend self
+    // Test 5: Verified CEO can view directory, invite with restricted role, approve pending user, and CANNOT create a second 'owner' or invite CEO email or suspend self
     const ceoDirRes = await fetch(`${harnessUrl}/team`, {
       headers: { Authorization: 'Bearer tok-ceo' },
     });
     assert(ceoDirRes.status === 200, `Expected 200 for verified CEO GET /team, got ${ceoDirRes.status}`);
+
+    const inviteSelfCeoEmail = await fetch(`${harnessUrl}/invitations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer tok-ceo',
+      },
+      body: JSON.stringify({
+        email: OFFICIAL_CEO_EMAIL,
+        role: 'admin',
+        permissions: ['projects.view'],
+      }),
+    });
+    assert(
+      inviteSelfCeoEmail.status === 400,
+      `Expected 400 when inviting official CEO email, got ${inviteSelfCeoEmail.status}`
+    );
 
     const illegalSecondOwnerInvite = await fetch(`${harnessUrl}/invitations`, {
       method: 'POST',
@@ -388,6 +477,99 @@ async function runPrivilegeEscalationSuite() {
       `Expected 403 when inviting a second owner, got ${illegalSecondOwnerInvite.status}`
     );
 
+    // Test 5b: CEO invites a new teammate WITHOUT service_role configured -> saves to team_invitations and honestly reports authEmailDispatched === false
+    simulatedServiceRoleEnabled = false;
+    const validNewInviteRes = await fetch(`${harnessUrl}/invitations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer tok-ceo',
+      },
+      body: JSON.stringify({
+        email: 'NewTeammate@aiconekt.org',
+        full_name: 'New Teammate',
+        role: 'event_manager',
+        permissions: ['events.view', 'events.create', 'projects.delete'], // projects.delete must be stripped!
+      }),
+    });
+    assert(
+      validNewInviteRes.status === 201,
+      `Expected 201 when CEO creates a valid teammate invitation, got ${validNewInviteRes.status}`
+    );
+    const savedInviteBody = await validNewInviteRes.json();
+    assert(
+      Boolean(savedInviteBody.invitation?.id) &&
+        savedInviteBody.invitation.email === 'newteammate@aiconekt.org' &&
+        savedInviteBody.invitation.role === 'event_manager' &&
+        savedInviteBody.invitation.status === 'pending' &&
+        savedInviteBody.invitation.permissions.includes('events.create') &&
+        !savedInviteBody.invitation.permissions.includes('projects.delete') &&
+        savedInviteBody.authEmailDispatched === false &&
+        savedInviteBody.memberActivatedImmediately === false,
+      'Saved invitation payload did not match expected sanitized team_invitations contract.'
+    );
+
+    // Duplicate pending invitation for the same email returns 400 with real error
+    const duplicateInviteRes = await fetch(`${harnessUrl}/invitations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer tok-ceo',
+      },
+      body: JSON.stringify({
+        email: 'newteammate@aiconekt.org',
+        role: 'viewer',
+        permissions: ['events.view'],
+      }),
+    });
+    assert(
+      duplicateInviteRes.status === 400,
+      `Expected 400 on duplicate pending invitation, got ${duplicateInviteRes.status}`
+    );
+
+    // Revoking pending invitation succeeds and updates status to revoked
+    const revokeInviteRes = await fetch(
+      `${harnessUrl}/invitations/${savedInviteBody.invitation.id}`,
+      {
+        method: 'DELETE',
+        headers: { Authorization: 'Bearer tok-ceo' },
+      }
+    );
+    assert(revokeInviteRes.status === 200, 'Expected 200 when CEO revokes pending invitation.');
+    assert(
+      dbInvitations.get(savedInviteBody.invitation.id)?.status === 'revoked',
+      'Revoked invitation was not marked revoked in store.'
+    );
+
+    // Inviting an already-registered pending user ('student@university.edu') records the invitation AND activates permissions immediately
+    const inviteExistingStudentRes = await fetch(`${harnessUrl}/invitations`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer tok-ceo',
+      },
+      body: JSON.stringify({
+        email: 'student@university.edu',
+        role: 'viewer',
+        permissions: ['projects.view', 'projects.delete'],
+        require_manual_approval: false,
+      }),
+    });
+    assert(
+      inviteExistingStudentRes.status === 201,
+      `Expected 201 when inviting an existing pending registrant, got ${inviteExistingStudentRes.status}`
+    );
+    const inviteExistingJson = await inviteExistingStudentRes.json();
+    assert(
+      inviteExistingJson.invitation.status === 'accepted' &&
+        inviteExistingJson.memberActivatedImmediately === true &&
+        dbMembers.get('uid-user-002')?.is_active === true &&
+        dbMembers.get('uid-user-002')?.role === 'viewer' &&
+        !dbMembers.get('uid-user-002')?.permissions.includes('projects.delete'),
+      'Existing registrant was not immediately activated with sanitized Viewer permissions.'
+    );
+    simulatedServiceRoleEnabled = true;
+
     const ceoSelfModify = await fetch(`${harnessUrl}/members/uid-ceo-001`, {
       method: 'PATCH',
       headers: {
@@ -405,7 +587,7 @@ async function runPrivilegeEscalationSuite() {
       `Expected 403 when CEO attempts self-demotion/suspension, got ${ceoSelfModify.status}`
     );
 
-    // CEO approves pending student as Project Editor with out-of-scope permission mixed in (server sanitizes!)
+    // CEO updates student as Project Editor with out-of-scope permission mixed in (server sanitizes!)
     const approveStudentRes = await fetch(`${harnessUrl}/members/uid-user-002`, {
       method: 'PATCH',
       headers: {
@@ -460,7 +642,7 @@ async function runPrivilegeEscalationSuite() {
   }
 
   console.log(
-    '✔ Passed all RBAC ceiling, email-spoofing, self-promotion, one-time bootstrap, and immediate revocation tests'
+    '✔ Passed service-key validation, invitation persistence, RBAC ceiling, email-spoofing, self-promotion, bootstrap, and revocation tests'
   );
 }
 
@@ -563,6 +745,10 @@ async function runVerification() {
       assert(
         !content.includes('Discover 3D Brand Identity'),
         `Found removed "Discover 3D Brand Identity" text in ${file}`
+      );
+      assert(
+        !content.includes('Database Pre-Authorization Mode'),
+        `Found stale "Database Pre-Authorization Mode" banner text in ${file}`
       );
       assert(
         content.includes(

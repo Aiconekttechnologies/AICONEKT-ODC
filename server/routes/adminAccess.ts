@@ -40,8 +40,15 @@ export interface ServerInvitationRow {
   require_manual_approval: boolean;
   status: 'pending' | 'accepted' | 'revoked' | 'expired';
   invited_by: string | null;
+  accepted_user_id?: string | null;
   expires_at: string;
   created_at: string;
+}
+
+export interface CreateInvitationResult {
+  invitation: ServerInvitationRow;
+  authEmailDispatched: boolean;
+  memberActivatedImmediately: boolean;
 }
 
 export interface AdminAccessDependencies {
@@ -72,7 +79,7 @@ export interface AdminAccessDependencies {
       require_manual_approval: boolean;
       redirectTo?: string;
     }
-  ) => Promise<{ invitation: ServerInvitationRow; authEmailDispatched: boolean }>;
+  ) => Promise<CreateInvitationResult>;
   updateMemberAccess: (
     ceoUserId: string,
     accessToken: string,
@@ -126,8 +133,9 @@ function buildDefaultDependencies(): AdminAccessDependencies {
     getBootstrapSecret: () => process.env.CEO_BOOTSTRAP_SECRET?.trim() || '',
 
     async verifyCaller(accessToken: string) {
+      // Prefer caller-scoped client so JWT verification works with or without service_role
       const client =
-        getSupabaseServiceClient() || createRequestSupabaseClient(accessToken);
+        createRequestSupabaseClient(accessToken) || getSupabaseServiceClient();
       if (!client) return null;
 
       const { data, error } = await client.auth.getUser(accessToken);
@@ -139,18 +147,34 @@ function buildDefaultDependencies(): AdminAccessDependencies {
     },
 
     async getAccessRecord(userId: string, accessToken: string) {
-      const client =
-        getSupabaseServiceClient() || createRequestSupabaseClient(accessToken);
-      if (!client) return null;
+      // Always prefer caller-scoped RLS client so PostgreSQL RLS verifies self/CEO access directly
+      const rlsClient = createRequestSupabaseClient(accessToken);
+      const serviceClient = getSupabaseServiceClient();
+      const primaryClient = rlsClient || serviceClient;
+      if (!primaryClient) return null;
 
-      const { data, error } = await client
+      const { data, error } = await primaryClient
         .from('admin_users')
         .select('*')
         .eq('user_id', userId)
         .maybeSingle();
 
-      if (error || !data) return null;
-      return data as ServerAccessMemberRow;
+      if (!error && data) {
+        return data as ServerAccessMemberRow;
+      }
+
+      if (serviceClient && primaryClient !== serviceClient) {
+        const fallback = await serviceClient
+          .from('admin_users')
+          .select('*')
+          .eq('user_id', userId)
+          .maybeSingle();
+        if (!fallback.error && fallback.data) {
+          return fallback.data as ServerAccessMemberRow;
+        }
+      }
+
+      return null;
     },
 
     async hasExistingOwner() {
@@ -168,7 +192,7 @@ function buildDefaultDependencies(): AdminAccessDependencies {
       const serviceClient = getSupabaseServiceClient();
       if (!serviceClient) {
         throw new Error(
-          'SUPABASE_SERVICE_ROLE_KEY is required on the server to run HTTP CEO bootstrap.'
+          'A valid SUPABASE_SERVICE_ROLE_KEY is required on the server to run HTTP CEO bootstrap.'
         );
       }
 
@@ -182,9 +206,9 @@ function buildDefaultDependencies(): AdminAccessDependencies {
     },
 
     async listTeamDirectory(accessToken: string) {
-      const serviceClient = getSupabaseServiceClient();
       const rlsClient = createRequestSupabaseClient(accessToken);
-      const dbClient = serviceClient || rlsClient;
+      const serviceClient = getSupabaseServiceClient();
+      const dbClient = rlsClient || serviceClient;
       if (!dbClient) {
         throw new Error('Supabase server configuration is unavailable.');
       }
@@ -205,43 +229,49 @@ function buildDefaultDependencies(): AdminAccessDependencies {
 
       let members = (membersRes.data || []) as ServerAccessMemberRow[];
 
-      // Enrich with Supabase Auth verification & sign-in metadata when service_role is available
+      // Enrich with Supabase Auth verification & sign-in metadata ONLY when a valid service_role key exists
       if (serviceClient) {
-        const { data: usersPage } = await serviceClient.auth.admin.listUsers({
-          page: 1,
-          perPage: 200,
-        });
-        if (usersPage?.users) {
-          const authMap = new Map(usersPage.users.map((u) => [u.id, u]));
-          const knownIds = new Set(members.map((m) => m.user_id));
+        try {
+          const { data: usersPage, error: listErr } =
+            await serviceClient.auth.admin.listUsers({
+              page: 1,
+              perPage: 200,
+            });
+          if (!listErr && usersPage?.users) {
+            const authMap = new Map(usersPage.users.map((u) => [u.id, u]));
+            const knownIds = new Set(members.map((m) => m.user_id));
 
-          members = members.map((m) => {
-            const authUser = authMap.get(m.user_id);
-            return {
-              ...m,
-              email_confirmed_at: authUser?.email_confirmed_at || null,
-              last_sign_in_at: authUser?.last_sign_in_at || m.last_sign_in_at || null,
-            };
-          });
+            members = members.map((m) => {
+              const authUser = authMap.get(m.user_id);
+              return {
+                ...m,
+                email_confirmed_at: authUser?.email_confirmed_at || null,
+                last_sign_in_at:
+                  authUser?.last_sign_in_at || m.last_sign_in_at || null,
+              };
+            });
 
-          // Include any auth.users accounts not yet synced into admin_users as pending/'none'
-          for (const authUser of usersPage.users) {
-            if (!knownIds.has(authUser.id) && authUser.email) {
-              members.push({
-                user_id: authUser.id,
-                email: authUser.email.toLowerCase(),
-                full_name:
-                  (authUser.user_metadata?.full_name as string | undefined) || null,
-                role: 'none',
-                access_status: 'pending',
-                is_active: false,
-                permissions: [],
-                registered_at: authUser.created_at,
-                last_sign_in_at: authUser.last_sign_in_at || null,
-                email_confirmed_at: authUser.email_confirmed_at || null,
-              });
+            for (const authUser of usersPage.users) {
+              if (!knownIds.has(authUser.id) && authUser.email) {
+                members.push({
+                  user_id: authUser.id,
+                  email: authUser.email.toLowerCase(),
+                  full_name:
+                    (authUser.user_metadata?.full_name as string | undefined) ||
+                    null,
+                  role: 'none',
+                  access_status: 'pending',
+                  is_active: false,
+                  permissions: [],
+                  registered_at: authUser.created_at,
+                  last_sign_in_at: authUser.last_sign_in_at || null,
+                  email_confirmed_at: authUser.email_confirmed_at || null,
+                });
+              }
             }
           }
+        } catch {
+          // Non-fatal: directory still returns authoritative PostgreSQL records
         }
       }
 
@@ -252,16 +282,65 @@ function buildDefaultDependencies(): AdminAccessDependencies {
     },
 
     async createInvitation(ceoUserId, accessToken, input) {
-      const serviceClient = getSupabaseServiceClient();
       const rlsClient = createRequestSupabaseClient(accessToken);
-      const dbClient = serviceClient || rlsClient;
+      const serviceClient = getSupabaseServiceClient();
+      const dbClient = rlsClient || serviceClient;
       if (!dbClient) {
         throw new Error('Supabase server configuration is unavailable.');
       }
 
       const normalizedEmail = input.email.trim().toLowerCase();
 
-      // Upsert pending invitation record
+      // 1. Check whether this email already belongs to a registered user in public.admin_users
+      const { data: existingMember, error: memberCheckErr } = await dbClient
+        .from('admin_users')
+        .select('*')
+        .eq('email', normalizedEmail)
+        .maybeSingle();
+
+      if (memberCheckErr) {
+        throw new Error(memberCheckErr.message);
+      }
+
+      if (existingMember && existingMember.role === 'owner') {
+        throw new Error('This email belongs to the CEO owner account.');
+      }
+
+      // 2. Check for any existing pending invitation for this email in public.team_invitations
+      const { data: existingPending, error: pendingCheckErr } = await dbClient
+        .from('team_invitations')
+        .select('*')
+        .eq('email', normalizedEmail)
+        .eq('status', 'pending')
+        .maybeSingle();
+
+      if (pendingCheckErr) {
+        throw new Error(pendingCheckErr.message);
+      }
+
+      if (existingPending) {
+        const expMs = Date.parse(existingPending.expires_at);
+        if (!Number.isNaN(expMs) && expMs <= Date.now()) {
+          // Automatically mark expired pending row as 'expired' so a fresh invite can be saved cleanly
+          const { error: expireErr } = await dbClient
+            .from('team_invitations')
+            .update({ status: 'expired' })
+            .eq('id', existingPending.id);
+          if (expireErr) {
+            throw new Error(expireErr.message);
+          }
+        } else {
+          throw new Error(
+            `A pending invitation already exists for ${normalizedEmail}. Revoke the existing invitation first if you want to issue a new one.`
+          );
+        }
+      }
+
+      const shouldActivateExistingNow = Boolean(
+        existingMember && !input.require_manual_approval
+      );
+
+      // 3. Persist the invitation to public.team_invitations and verify the saved row
       const { data: invRow, error: invErr } = await dbClient
         .from('team_invitations')
         .insert({
@@ -270,41 +349,89 @@ function buildDefaultDependencies(): AdminAccessDependencies {
           role: input.role,
           permissions: input.permissions,
           require_manual_approval: input.require_manual_approval,
-          status: 'pending',
+          status: shouldActivateExistingNow ? 'accepted' : 'pending',
           invited_by: ceoUserId,
+          ...(shouldActivateExistingNow && existingMember
+            ? { accepted_user_id: existingMember.user_id }
+            : {}),
         })
         .select('*')
         .single();
 
-      if (invErr) {
-        throw new Error(invErr.message);
+      if (invErr || !invRow?.id) {
+        throw new Error(
+          invErr?.message ||
+            'Database did not confirm saving the invitation to public.team_invitations.'
+        );
       }
 
+      // 4. If the teammate has ALREADY registered in public.admin_users, apply the CEO-assigned role & permissions
+      let memberActivatedImmediately = false;
+      if (existingMember) {
+        const nextStatus: AccessStatus = input.require_manual_approval
+          ? 'pending'
+          : 'active';
+        const nextActive = !input.require_manual_approval;
+
+        const updatePayload: Record<string, unknown> = {
+          role: input.role,
+          access_status: nextStatus,
+          is_active: nextActive,
+          permissions: input.permissions,
+          invited_by: ceoUserId,
+          ...(input.full_name && !existingMember.full_name
+            ? { full_name: input.full_name }
+            : {}),
+          ...(nextActive
+            ? {
+                approved_by: ceoUserId,
+                approved_at: new Date().toISOString(),
+              }
+            : {}),
+        };
+
+        const { error: updateMemberErr } = await dbClient
+          .from('admin_users')
+          .update(updatePayload)
+          .eq('user_id', existingMember.user_id);
+
+        if (updateMemberErr) {
+          throw new Error(updateMemberErr.message);
+        }
+
+        memberActivatedImmediately = nextActive;
+      }
+
+      // 5. Dispatch Supabase Auth invite email ONLY if a real service_role client is configured and user isn't registered yet
       let authEmailDispatched = false;
-      if (serviceClient) {
-        const inviteRes = await serviceClient.auth.admin.inviteUserByEmail(
-          normalizedEmail,
-          {
-            data: input.full_name ? { full_name: input.full_name } : undefined,
-            redirectTo: input.redirectTo,
+      if (!existingMember && serviceClient) {
+        try {
+          const inviteRes = await serviceClient.auth.admin.inviteUserByEmail(
+            normalizedEmail,
+            {
+              data: input.full_name ? { full_name: input.full_name } : undefined,
+              redirectTo: input.redirectTo,
+            }
+          );
+          if (!inviteRes.error) {
+            authEmailDispatched = true;
           }
-        );
-        // If user hasn't registered yet, Supabase dispatches an email invite
-        if (!inviteRes.error) {
-          authEmailDispatched = true;
+        } catch {
+          authEmailDispatched = false;
         }
       }
 
       return {
         invitation: invRow as ServerInvitationRow,
         authEmailDispatched,
+        memberActivatedImmediately,
       };
     },
 
     async updateMemberAccess(ceoUserId, accessToken, targetUserId, updates) {
-      const serviceClient = getSupabaseServiceClient();
       const rlsClient = createRequestSupabaseClient(accessToken);
-      const dbClient = serviceClient || rlsClient;
+      const serviceClient = getSupabaseServiceClient();
+      const dbClient = rlsClient || serviceClient;
       if (!dbClient) {
         throw new Error('Supabase server configuration is unavailable.');
       }
@@ -340,7 +467,7 @@ function buildDefaultDependencies(): AdminAccessDependencies {
 
     async revokeInvitation(_ceoUserId, accessToken, invitationId) {
       const dbClient =
-        getSupabaseServiceClient() || createRequestSupabaseClient(accessToken);
+        createRequestSupabaseClient(accessToken) || getSupabaseServiceClient();
       if (!dbClient) {
         throw new Error('Supabase server configuration is unavailable.');
       }
@@ -445,7 +572,7 @@ export function createAdminAccessRouter(
     if (!deps.hasServiceRole()) {
       res.status(503).json({
         error:
-          'SUPABASE_SERVICE_ROLE_KEY is not configured on the server. Run SELECT public.bootstrap_initial_ceo_owner(); in the Supabase SQL Editor instead.',
+          'A valid SUPABASE_SERVICE_ROLE_KEY is not configured on the server. Run SELECT public.bootstrap_initial_ceo_owner(); in the Supabase SQL Editor instead.',
       });
       return;
     }
