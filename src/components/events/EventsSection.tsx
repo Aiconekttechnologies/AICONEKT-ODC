@@ -15,6 +15,7 @@ import {
   fetchPublishedPastEvents,
   subscribeToPublicContent,
 } from '../../services/supabaseService';
+import { EventParticipationButton } from './EventParticipationButton';
 
 export function formatEventDateDisplay(iso: string): string {
   const ms = Date.parse(iso);
@@ -91,7 +92,7 @@ export const EventsSection: React.FC = () => {
       : activeList.filter((e) => e.category === categoryFilter);
 
   return (
-    <section id="events" className="py-24 bg-[#030712] relative min-h-screen">
+    <section id="events" className="py-24 bg-transparent relative min-h-screen">
       {/* Glow Backdrop */}
       <div className="absolute top-1/4 right-0 w-96 h-96 bg-violet-900/10 blur-[140px] pointer-events-none" />
       <div className="absolute bottom-10 left-10 w-96 h-96 bg-cyan-900/10 blur-[130px] pointer-events-none" />
@@ -294,6 +295,12 @@ export const EventsSection: React.FC = () => {
                         ))}
                       </div>
                     )}
+                    {/* Interactive Viewer Participation */}
+                    <EventParticipationButton
+                      eventId={evt.id}
+                      eventTitle={evt.title}
+                      isUpcoming={viewMode === 'upcoming'}
+                    />
                   </div>
                 </div>
 

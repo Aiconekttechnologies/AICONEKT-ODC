@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import adminAccessRouter from './routes/adminAccess.js';
+import eventRegistrationsRouter from './routes/eventRegistrations.js';
 import { isServiceRoleConfigured } from './lib/supabaseAdmin.js';
 
 dotenv.config();
@@ -24,6 +25,9 @@ app.use(express.json({ limit: '2mb' }));
 
 // Trusted Server-Side CEO Access & Supabase Auth Admin API
 app.use('/api/admin', adminAccessRouter);
+
+// Free, No-Supabase Direct Event Participation API
+app.use('/api/events', eventRegistrationsRouter);
 
 // System Health Check
 app.get('/api/health', (_req, res) => {
