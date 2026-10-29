@@ -3,6 +3,7 @@ import { useAuth } from '../../context/AuthContext';
 import { BrandLogo } from '../brand/BrandLogo';
 import { ProjectCard } from '../projects/ProjectCard';
 import { TeamAccessPanel } from './TeamAccessPanel';
+import { TeamManagementPanel } from './TeamManagementPanel';
 import {
   AppServiceError,
   CareerApplicationRecord,
@@ -31,6 +32,9 @@ import {
   updateAdminEvent,
   updateAdminInquiryStatus,
   updateAdminProject,
+  fetchAllEventParticipants,
+  adminRemoveParticipant,
+  EventParticipantRecord,
 } from '../../services/supabaseService';
 import {
   LayoutDashboard,
@@ -56,6 +60,7 @@ import {
   X,
   Globe,
   Lock,
+  Crown,
 } from 'lucide-react';
 
 interface DashboardProps {
@@ -166,6 +171,7 @@ function formatShortTimestamp(iso: string): string {
 type DashboardTabId =
   | 'overview'
   | 'team-access'
+  | 'team-management'
   | 'projects'
   | 'events'
   | 'inbox'
@@ -215,6 +221,8 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
   const [events, setEvents] = useState<EventRecord[]>([]);
   const [inbox, setInbox] = useState<ContactInquiryRecord[]>([]);
   const [applications, setApplications] = useState<CareerApplicationRecord[]>([]);
+  const [participants, setParticipants] = useState<EventParticipantRecord[]>([]);
+  const [selectedEventForRoster, setSelectedEventForRoster] = useState<EventRecord | null>(null);
 
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<string | null>(null);
@@ -269,17 +277,19 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
         setLoadError(null);
         setSessionExpired(false);
 
-        const [projRows, evtRows, inqRows, appRows] = await Promise.all([
+        const [projRows, evtRows, inqRows, appRows, partRows] = await Promise.all([
           canAccessProjects ? fetchAdminProjects() : Promise.resolve([]),
           canAccessEvents ? fetchAdminEvents() : Promise.resolve([]),
           canAccessInbox ? fetchAdminInquiries() : Promise.resolve([]),
           canAccessApplications ? fetchAdminApplications() : Promise.resolve([]),
+          canAccessEvents ? fetchAllEventParticipants() : Promise.resolve([]),
         ]);
 
         setProjects(projRows);
         setEvents(evtRows);
         setInbox(inqRows);
         setApplications(appRows);
+        setParticipants(partRows);
       } catch (err: unknown) {
         if (err instanceof AppServiceError && err.kind === 'session_expired') {
           setSessionExpired(true);
@@ -325,6 +335,13 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
         label: 'Team Access',
         icon: ShieldCheck,
         badge: 'CEO',
+        highlightBadge: true,
+      });
+      items.push({
+        id: 'team-management',
+        label: 'Appoint Leads & Team',
+        icon: Users,
+        badge: 'ROSTER',
         highlightBadge: true,
       });
     }
@@ -770,7 +787,7 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
   };
 
   return (
-    <div className="min-h-screen bg-[#030712] text-slate-100 flex flex-col pt-20">
+    <div className="min-h-screen bg-transparent text-slate-100 flex flex-col pt-20">
       {/* Dashboard Top Banner */}
       <div className="bg-slate-950 border-b border-slate-800/80 px-4 sm:px-8 py-4">
         <div className="max-w-7xl mx-auto flex flex-wrap items-center justify-between gap-4">
@@ -927,6 +944,11 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                 <TeamAccessPanel onNotify={showBanner} />
               )}
 
+              {/* CEO-ONLY TEAM LEADS & MEMBER PROFILES MANAGEMENT */}
+              {activeTab === 'team-management' && canManageTeamAccess && (
+                <TeamManagementPanel />
+              )}
+
               {/* TAB 1: EXECUTIVE OVERVIEW */}
               {activeTab === 'overview' && canViewOverview && (
                 <div className="space-y-8">
@@ -940,6 +962,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                       </p>
                     </div>
                     <div className="flex flex-wrap items-center gap-2.5">
+                      {canManageTeamAccess && (
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('team-management')}
+                          className="inline-flex items-center gap-1.5 px-4 py-2 rounded-xl bg-gradient-to-r from-amber-500 to-orange-600 text-slate-950 font-bold text-xs font-mono uppercase tracking-wider hover:opacity-95 shadow-md shadow-orange-500/20"
+                        >
+                          <Users className="w-3.5 h-3.5" />
+                          <span>Manage Teams</span>
+                        </button>
+                      )}
                       {canManageTeamAccess && (
                         <button
                           type="button"
@@ -979,67 +1011,127 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                     </div>
                   </div>
 
-                  {/* Real Database Metric Cards (Scoped to Permitted Tables) */}
+                  {/* Real Database Metric Cards (Scoped to Permitted Tables) - Clickable to open corresponding page */}
                   <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-                    <div className="bg-slate-900/60 p-5 rounded-xl border border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => canAccessProjects && setActiveTab('projects')}
+                      className={`text-left p-5 rounded-xl border transition-all duration-200 group ${
+                        canAccessProjects
+                          ? 'bg-slate-900/60 hover:bg-slate-900 hover:border-cyan-500/50 cursor-pointer shadow-lg hover:shadow-cyan-500/10'
+                          : 'bg-slate-900/30 border-slate-800/60 opacity-60 cursor-not-allowed'
+                      }`}
+                    >
                       <div className="flex items-center justify-between text-slate-400 text-xs font-mono">
-                        <span>Published Projects</span>
-                        <FolderGit2 className="w-4 h-4 text-cyan-400" />
+                        <span className="group-hover:text-cyan-300 transition-colors">Published Projects</span>
+                        <FolderGit2 className="w-4 h-4 text-cyan-400 group-hover:scale-110 transition-transform" />
                       </div>
                       <div className="font-display font-bold text-3xl text-white mt-2 tabular-nums">
                         {canAccessProjects ? publishedProjectsCount : '—'}
                       </div>
-                      <div className="text-[11px] font-mono text-slate-400 mt-1 tabular-nums">
-                        {canAccessProjects
-                          ? `${draftProjectsCount} Draft · ${projects.length} Total`
-                          : 'No project view permission'}
+                      <div className="text-[11px] font-mono text-slate-400 mt-1 tabular-nums flex items-center justify-between">
+                        <span>
+                          {canAccessProjects
+                            ? `${draftProjectsCount} Draft · ${projects.length} Total`
+                            : 'No project view permission'}
+                        </span>
+                        {canAccessProjects && (
+                          <span className="text-cyan-400 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity">
+                            Open Manager →
+                          </span>
+                        )}
                       </div>
-                    </div>
+                    </button>
 
-                    <div className="bg-slate-900/60 p-5 rounded-xl border border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => canAccessEvents && setActiveTab('events')}
+                      className={`text-left p-5 rounded-xl border transition-all duration-200 group ${
+                        canAccessEvents
+                          ? 'bg-slate-900/60 hover:bg-slate-900 hover:border-blue-500/50 cursor-pointer shadow-lg hover:shadow-blue-500/10'
+                          : 'bg-slate-900/30 border-slate-800/60 opacity-60 cursor-not-allowed'
+                      }`}
+                    >
                       <div className="flex items-center justify-between text-slate-400 text-xs font-mono">
-                        <span>Upcoming Events</span>
-                        <Trophy className="w-4 h-4 text-blue-400" />
+                        <span className="group-hover:text-blue-300 transition-colors">Upcoming Events</span>
+                        <Trophy className="w-4 h-4 text-blue-400 group-hover:scale-110 transition-transform" />
                       </div>
                       <div className="font-display font-bold text-3xl text-white mt-2 tabular-nums">
                         {canAccessEvents ? upcomingPublishedEventsCount : '—'}
                       </div>
-                      <div className="text-[11px] font-mono text-slate-400 mt-1 tabular-nums">
-                        {canAccessEvents
-                          ? `${events.length} Total Scheduled Records`
-                          : 'No event view permission'}
+                      <div className="text-[11px] font-mono text-slate-400 mt-1 tabular-nums flex items-center justify-between">
+                        <span>
+                          {canAccessEvents
+                            ? `${events.length} Total Scheduled Records`
+                            : 'No event view permission'}
+                        </span>
+                        {canAccessEvents && (
+                          <span className="text-blue-400 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity">
+                            Open Manager →
+                          </span>
+                        )}
                       </div>
-                    </div>
+                    </button>
 
-                    <div className="bg-slate-900/60 p-5 rounded-xl border border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => canAccessApplications && setActiveTab('applications')}
+                      className={`text-left p-5 rounded-xl border transition-all duration-200 group ${
+                        canAccessApplications
+                          ? 'bg-slate-900/60 hover:bg-slate-900 hover:border-violet-500/50 cursor-pointer shadow-lg hover:shadow-violet-500/10'
+                          : 'bg-slate-900/30 border-slate-800/60 opacity-60 cursor-not-allowed'
+                      }`}
+                    >
                       <div className="flex items-center justify-between text-slate-400 text-xs font-mono">
-                        <span>Roster Applications</span>
-                        <Users className="w-4 h-4 text-violet-400" />
+                        <span className="group-hover:text-violet-300 transition-colors">Roster Applications</span>
+                        <Users className="w-4 h-4 text-violet-400 group-hover:scale-110 transition-transform" />
                       </div>
                       <div className="font-display font-bold text-3xl text-white mt-2 tabular-nums">
                         {canAccessApplications ? applications.length : '—'}
                       </div>
-                      <div className="text-[11px] font-mono text-slate-400 mt-1 tabular-nums">
-                        {canAccessApplications
-                          ? `${pendingApplicationsCount} Pending Review`
-                          : 'No applications permission'}
+                      <div className="text-[11px] font-mono text-slate-400 mt-1 tabular-nums flex items-center justify-between">
+                        <span>
+                          {canAccessApplications
+                            ? `${pendingApplicationsCount} Pending Review`
+                            : 'No applications permission'}
+                        </span>
+                        {canAccessApplications && (
+                          <span className="text-violet-400 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity">
+                            Open Roster →
+                          </span>
+                        )}
                       </div>
-                    </div>
+                    </button>
 
-                    <div className="bg-slate-900/60 p-5 rounded-xl border border-slate-800">
+                    <button
+                      type="button"
+                      onClick={() => canAccessInbox && setActiveTab('inbox')}
+                      className={`text-left p-5 rounded-xl border transition-all duration-200 group ${
+                        canAccessInbox
+                          ? 'bg-slate-900/60 hover:bg-slate-900 hover:border-emerald-500/50 cursor-pointer shadow-lg hover:shadow-emerald-500/10'
+                          : 'bg-slate-900/30 border-slate-800/60 opacity-60 cursor-not-allowed'
+                      }`}
+                    >
                       <div className="flex items-center justify-between text-slate-400 text-xs font-mono">
-                        <span>Inbound Inquiries</span>
-                        <Mail className="w-4 h-4 text-emerald-400" />
+                        <span className="group-hover:text-emerald-300 transition-colors">Inbound Inquiries</span>
+                        <Mail className="w-4 h-4 text-emerald-400 group-hover:scale-110 transition-transform" />
                       </div>
                       <div className="font-display font-bold text-3xl text-white mt-2 tabular-nums">
                         {canAccessInbox ? inbox.length : '—'}
                       </div>
-                      <div className="text-[11px] font-mono text-slate-400 mt-1 tabular-nums">
-                        {canAccessInbox
-                          ? `${unreadInquiriesCount} Unread Messages`
-                          : 'No inbox permission'}
+                      <div className="text-[11px] font-mono text-slate-400 mt-1 tabular-nums flex items-center justify-between">
+                        <span>
+                          {canAccessInbox
+                            ? `${unreadInquiriesCount} Unread Messages`
+                            : 'No inbox permission'}
+                        </span>
+                        {canAccessInbox && (
+                          <span className="text-emerald-400 text-[10px] opacity-0 group-hover:opacity-100 transition-opacity">
+                            Open Inbox →
+                          </span>
+                        )}
                       </div>
-                    </div>
+                    </button>
                   </div>
 
                   {/* Security Posture Summary */}
@@ -1353,6 +1445,16 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                                   {evt.location}
                                   {evt.is_virtual ? ' (Online)' : ''}
                                 </span>
+                                <button
+                                  type="button"
+                                  onClick={() => setSelectedEventForRoster(evt)}
+                                  className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 font-bold transition-colors"
+                                >
+                                  <Users className="w-3 h-3 text-cyan-400" />
+                                  <span>
+                                    {participants.filter((p) => p.event_id === evt.id && p.status !== 'withdrawn').length} Interested / Registered
+                                  </span>
+                                </button>
                               </div>
                               <p className="text-xs text-slate-400 line-clamp-2">{evt.description}</p>
                             </div>
@@ -2182,6 +2284,102 @@ export const Dashboard: React.FC<DashboardProps> = ({ onLogout }) => {
                   {savingEvent ? 'Publishing...' : 'Publish Event'}
                 </button>
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================
+          EVENT PARTICIPANTS / ROSTER INSPECTION MODAL (CEO & Event Managers)
+         ======================================================================== */}
+      {selectedEventForRoster && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-md">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl max-w-2xl w-full p-6 sm:p-8 space-y-6 relative shadow-2xl animate-in zoom-in-95 duration-200 max-h-[85vh] overflow-y-auto">
+            <button
+              type="button"
+              onClick={() => setSelectedEventForRoster(null)}
+              className="absolute top-5 right-5 p-2 text-slate-400 hover:text-white bg-slate-800 rounded-full"
+            >
+              <X className="w-4 h-4" />
+            </button>
+
+            <div>
+              <div className="flex items-center gap-2 text-xs font-mono text-cyan-400">
+                <Trophy className="w-4 h-4" />
+                <span>PARTICIPATION ROSTER</span>
+              </div>
+              <h3 className="font-display font-bold text-2xl text-white mt-1">
+                {selectedEventForRoster.title}
+              </h3>
+              <p className="text-slate-400 text-xs mt-1">
+                Verified student participation & registrations submitted through the public website.
+              </p>
+            </div>
+
+            {participants.filter((p) => p.event_id === selectedEventForRoster.id).length === 0 ? (
+              <div className="p-8 text-center bg-slate-950 rounded-xl border border-slate-800 text-slate-400 text-xs font-mono">
+                No users have expressed interest or registered for this event yet.
+              </div>
+            ) : (
+              <div className="divide-y divide-slate-800 border border-slate-800 rounded-xl overflow-hidden bg-slate-950">
+                {participants
+                  .filter((p) => p.event_id === selectedEventForRoster.id)
+                  .map((p) => (
+                    <div key={p.id} className="p-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                      <div className="space-y-1">
+                        <div className="flex items-center gap-2">
+                          <span className="font-semibold text-white text-sm">{p.full_name}</span>
+                          {p.roll_number && (
+                            <span className="px-2 py-0.5 rounded bg-cyan-950/70 border border-cyan-800/60 text-cyan-300 text-[11px] font-mono font-bold">
+                              {p.roll_number}
+                            </span>
+                          )}
+                        </div>
+                        <div className="text-xs text-slate-300 flex flex-wrap gap-x-3 gap-y-1">
+                          <span>📧 {p.email}</span>
+                          {p.phone && <span>📞 {p.phone}</span>}
+                        </div>
+                        {(p.college || p.branch) && (
+                          <div className="text-xs text-slate-400 flex flex-wrap gap-x-2">
+                            {p.college && <span className="text-slate-300 font-medium">🏫 {p.college}</span>}
+                            {p.branch && <span className="text-cyan-400/90 font-mono">({p.branch})</span>}
+                          </div>
+                        )}
+                        <div className="text-[10px] font-mono text-slate-500 pt-0.5">
+                          Registered: {new Date(p.created_at).toLocaleString()} · Status: <span className="text-cyan-400 capitalize">{p.status}</span>
+                        </div>
+                      </div>
+
+                      {canManageTeamAccess && (
+                        <div className="self-end sm:self-center shrink-0">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              if (window.confirm(`Remove ${p.full_name} from this event roster?`)) {
+                                await adminRemoveParticipant(p.id);
+                                setParticipants((prev) => prev.filter((item) => item.id !== p.id));
+                                showBanner('success', `Removed ${p.full_name} from participation list.`);
+                              }
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 border border-rose-500/30 text-xs font-mono transition-colors"
+                          >
+                            Remove
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  ))}
+              </div>
+            )}
+
+            <div className="flex justify-end pt-2 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() => setSelectedEventForRoster(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-mono"
+              >
+                Close Roster
+              </button>
             </div>
           </div>
         </div>

@@ -1,5 +1,4 @@
 import React from 'react';
-import { Aiconekt3DScene } from '../three/Aiconekt3DScene';
 import { ArrowRight } from 'lucide-react';
 
 interface HeroSectionProps {
@@ -11,17 +10,17 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
   onExploreWork,
 }) => {
   return (
-    <section className="relative min-h-[115vh] w-full flex flex-col justify-between pt-24 pb-12 overflow-hidden bg-[#030712]">
+    <section className="relative min-h-[110vh] w-full flex flex-col justify-between pt-28 sm:pt-36 pb-12 overflow-hidden bg-transparent">
       {/* Background Cinematic Atmosphere & Grid */}
       <div className="absolute inset-0 pointer-events-none">
         {/* Deep radial midnight navy & violet atmospheric glow */}
-        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] sm:w-[900px] h-[500px] bg-gradient-to-tr from-cyan-950/20 via-blue-900/15 to-violet-950/25 blur-[140px] rounded-full" />
+        <div className="absolute top-1/4 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[700px] sm:w-[900px] h-[500px] bg-gradient-to-tr from-cyan-950/15 via-blue-900/10 to-violet-950/20 blur-[140px] rounded-full" />
         <div className="absolute bottom-10 left-10 w-96 h-96 bg-blue-900/10 blur-[120px] rounded-full" />
         <div className="absolute top-40 right-10 w-80 h-80 bg-violet-900/10 blur-[110px] rounded-full" />
 
         {/* Precision Architectural Grid Pattern */}
         <div
-          className="absolute inset-0 opacity-[0.035]"
+          className="absolute inset-0 opacity-[0.025]"
           style={{
             backgroundImage: `linear-gradient(to right, #ffffff 1px, transparent 1px), linear-gradient(to bottom, #ffffff 1px, transparent 1px)`,
             backgroundSize: '48px 48px',
@@ -29,13 +28,13 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
         />
 
         {/* Subtle Horizontal Tech Laser Lines */}
-        <div className="absolute top-1/3 left-0 right-0 h-px bg-gradient-to-r from-transparent via-cyan-500/20 to-transparent" />
-        <div className="absolute bottom-1/4 left-0 right-0 h-px bg-gradient-to-r from-transparent via-blue-500/15 to-transparent" />
+        <div className="absolute top-1/3 left-0 right-0 h-px bg-gradient-to-r from-transparent via-cyan-500/15 to-transparent" />
+        <div className="absolute bottom-1/4 left-0 right-0 h-px bg-gradient-to-r from-transparent via-blue-500/10 to-transparent" />
       </div>
 
       {/* Main Hero Container */}
       <div className="relative z-10 max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 w-full flex-1 flex flex-col justify-center">
-        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-center pt-8 sm:pt-12">
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-center pt-2 sm:pt-6">
           {/* Left Column: Brand Typography & Action Hierarchy */}
           <div className="lg:col-span-7 flex flex-col items-start text-left z-20 space-y-6">
             {/* Eyebrow Badge */}
@@ -97,13 +96,24 @@ export const HeroSection: React.FC<HeroSectionProps> = ({
             </div>
           </div>
 
-          {/* Right Column: Genuine 3D Three.js Emblem Canvas with Scroll-Controlled Rotation */}
-          <div className="lg:col-span-5 relative h-[450px] sm:h-[550px] lg:h-[640px] w-full flex items-center justify-center">
-            <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-              <div className="w-[320px] sm:w-[420px] h-[320px] sm:h-[420px] bg-gradient-to-tr from-cyan-500/15 via-blue-600/15 to-violet-600/15 blur-[90px] rounded-full" />
-            </div>
+          {/* Right Column: Hero Visual Atmosphere */}
+          <div className="lg:col-span-5 relative h-[380px] sm:h-[480px] lg:h-[560px] w-full flex items-center justify-center">
+            <div className="relative w-full max-w-[420px] aspect-square flex items-center justify-center">
+              {/* Concentric Ambient Glow Rings */}
+              <div className="absolute inset-0 rounded-full bg-gradient-to-tr from-orange-500/20 via-red-600/15 to-transparent blur-[80px]" />
+              <div className="absolute inset-8 rounded-full border border-orange-500/20 opacity-60 animate-[pulse_4s_ease-in-out_infinite]" />
+              <div className="absolute inset-16 rounded-full border border-amber-500/15 opacity-40" />
 
-            <Aiconekt3DScene interactive={true} className="z-10" />
+              {/* The Genuine Official Master Artwork */}
+              <div className="relative z-10 w-full p-4 sm:p-6 flex items-center justify-center">
+                <img
+                  src="./brand/aiconekt-official-logo.jpg"
+                  alt="AICONEKT TECHNOLOGIES Official Master Logo"
+                  className="w-full h-auto max-h-[360px] object-contain rounded-2xl shadow-2xl border border-orange-500/30 filter drop-shadow-[0_0_35px_rgba(255,100,0,0.35)]"
+                  loading="eager"
+                />
+              </div>
+            </div>
           </div>
         </div>
       </div>

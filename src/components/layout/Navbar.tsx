@@ -33,6 +33,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'projects', label: 'Our Projects' },
     { id: 'events', label: 'Flagship Events' },
     { id: 'teams', label: 'Teams & Labs' },
+    { id: 'leads', label: 'Team Leads' },
     { id: 'dashboard', label: 'Dashboard' },
     { id: 'contact', label: 'Connect' },
   ];
@@ -48,11 +49,11 @@ export const Navbar: React.FC<NavbarProps> = ({
     <header
       className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${
         scrolled
-          ? 'bg-slate-950/85 backdrop-blur-xl border-b border-slate-800/80 shadow-2xl py-3'
-          : 'bg-transparent py-5'
+          ? 'bg-slate-950/90 backdrop-blur-xl border-b border-slate-800/80 shadow-2xl py-3'
+          : 'bg-gradient-to-b from-slate-950/80 via-slate-950/40 to-transparent py-4 sm:py-5'
       }`}
     >
-      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-between min-h-[44px]">
         {/* Brand Logo */}
         <BrandLogo
           variant="horizontal"
@@ -61,7 +62,7 @@ export const Navbar: React.FC<NavbarProps> = ({
             onSelectTab('home');
             window.scrollTo({ top: 0, behavior: 'smooth' });
           }}
-          className="group cursor-pointer"
+          className="group cursor-pointer shrink-0"
         />
 
         {/* Desktop Navigation Links */}

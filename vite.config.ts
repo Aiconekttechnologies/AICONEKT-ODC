@@ -24,7 +24,7 @@ function spa404Plugin() {
 // https://vitejs.dev/config/
 export default defineConfig({
   plugins: [react(), spa404Plugin()],
-  base: '/',
+  base: process.env.VITE_BASE_PATH || '/AICONEKT-ODC/',
   server: {
     port: 3000,
     host: '0.0.0.0',

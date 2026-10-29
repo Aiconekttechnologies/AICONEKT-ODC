@@ -10,12 +10,14 @@ import {
   formatEventTimeDisplay,
 } from './components/events/EventsSection';
 import { TeamsSection } from './components/teams/TeamsSection';
+import { LeadsPage } from './components/teams/LeadsPage';
 import { ContactSection } from './components/contact/ContactSection';
 import { Dashboard } from './components/dashboard/Dashboard';
 import { Footer } from './components/layout/Footer';
 import { AuthModal } from './components/auth/AuthModal';
 import { JoinModal } from './components/teams/JoinModal';
 import { BrandLogo } from './components/brand/BrandLogo';
+import { LogoAtmosphericBackground } from './components/brand/LogoAtmosphericBackground';
 import { GithubIcon } from './components/common/SocialIcons';
 import { useAuth } from './context/AuthContext';
 import { isSupabaseConfigured, supabaseConfigError } from './lib/supabase';
@@ -122,6 +124,8 @@ export const App: React.FC = () => {
       '/hackathons': 'events',
       '/teams': 'teams',
       '/labs': 'teams',
+      '/leads': 'leads',
+      '/team-leads': 'leads',
       '/brand': 'brand',
       '/identity': 'brand',
       '/login': 'login',
@@ -232,7 +236,10 @@ export const App: React.FC = () => {
   }, [currentTab, loadHomeProjects, loadHomeEvents]);
 
   return (
-    <div className="bg-[#030712] text-slate-100 min-h-screen selection:bg-cyan-500/30 selection:text-cyan-200">
+    <div className="bg-[#030712] text-slate-100 min-h-screen selection:bg-orange-500/30 selection:text-orange-200 relative">
+      {/* Official AICONEXT Logo Atmospheric Background Visual */}
+      <LogoAtmosphericBackground />
+
       {/* Global Navbar */}
       <Navbar
         currentTab={currentTab}
@@ -255,7 +262,7 @@ export const App: React.FC = () => {
             />
 
             {/* Dynamic Read-Only "Our Projects" Section */}
-            <section id="featured-work" className="py-20 bg-[#040816] relative border-t border-slate-900">
+            <section id="featured-work" className="py-20 bg-[#040816]/70 backdrop-blur-md relative border-t border-slate-900/80">
               <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-12">
                 <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
                   <div className="space-y-1">
@@ -341,17 +348,17 @@ export const App: React.FC = () => {
               </div>
             </section>
 
-            {/* Preserved Official Company Logo Section */}
-            <section className="py-20 bg-gradient-to-r from-slate-950 via-[#070d1e] to-slate-950 border-y border-slate-900 relative overflow-hidden">
+            {/* Preserved Official Company Logo Showcase Section */}
+            <section className="py-20 bg-slate-950/60 backdrop-blur-md border-y border-slate-900/80 relative overflow-hidden">
               <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 flex items-center justify-center">
-                <div className="bg-slate-950/80 p-8 rounded-3xl border border-slate-800 shadow-2xl flex flex-col items-center text-center">
+                <div className="bg-slate-950/80 p-8 sm:p-12 rounded-3xl border border-orange-500/20 shadow-2xl flex flex-col items-center text-center">
                   <BrandLogo variant="full-artwork" size="lg" />
                 </div>
               </div>
             </section>
 
             {/* Read-Only Upcoming Flagship Events Section */}
-            <section className="py-20 bg-[#030712]">
+            <section className="py-20 bg-[#030712]/70 backdrop-blur-md border-t border-slate-900/80">
               <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 space-y-10">
                 <div className="flex flex-col md:flex-row md:items-end justify-between gap-4">
                   <div className="space-y-1">
@@ -519,6 +526,13 @@ export const App: React.FC = () => {
         {currentTab === 'events' && <EventsSection />}
 
         {currentTab === 'teams' && <TeamsSection />}
+
+        {currentTab === 'leads' && (
+          <LeadsPage
+            onSelectTab={handleSelectTab}
+            onOpenJoinModal={() => setIsJoinModalOpen(true)}
+          />
+        )}
 
         {currentTab === 'brand' && <BrandShowcase />}
 

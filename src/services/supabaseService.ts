@@ -108,6 +108,41 @@ export interface CareerApplicationRecord {
   submitted_at: string;
 }
 
+export interface EventParticipantRecord {
+  id: string;
+  event_id: string;
+  event_title?: string;
+  user_id?: string | null;
+  full_name: string;
+  email: string;
+  phone?: string | null;
+  college?: string | null;
+  branch?: string | null;
+  roll_number?: string | null;
+  created_at: string;
+  status: 'registered' | 'withdrawn' | 'confirmed' | 'attended' | 'cancelled';
+}
+
+export interface TeamMemberRecord {
+  id: string;
+  user_id: string | null;
+  full_name: string;
+  email: string;
+  role_title: string;
+  department: string;
+  is_lead: boolean;
+  lead_id: string | null;
+  bio: string | null;
+  avatar_url: string | null;
+  github_url: string | null;
+  linkedin_url: string | null;
+  portfolio_url: string | null;
+  is_active: boolean;
+  display_order: number;
+  created_at: string;
+  updated_at: string;
+}
+
 export type ServiceErrorKind =
   | 'missing_configuration'
   | 'permission_denied'
@@ -199,11 +234,33 @@ export function translateSupabaseError(err: any, fallbackMessage: string): AppSe
     lower.includes('does not exist') ||
     lower.includes('schema cache')
   ) {
-    return new AppServiceError(
-      'Required Supabase RBAC tables or columns were not found. Apply migrations 20261025000001 and 20261025000002 in your Supabase SQL Editor.',
-      'schema_missing',
-      code
-    );
+    // Provide a precise, actionable diagnostics message identifying the missing database structure
+    let specificDetail = '';
+    if (lower.includes('admin_users')) {
+      specificDetail = 'table "public.admin_users"';
+    } else if (lower.includes('team_invitations')) {
+      specificDetail = 'table "public.team_invitations"';
+    } else if (lower.includes('team_members')) {
+      specificDetail = 'table "public.team_members"';
+    } else if (lower.includes('event_participants')) {
+      specificDetail = 'table "public.event_participants"';
+    } else if (lower.includes('projects')) {
+      specificDetail = 'table "public.projects"';
+    } else if (lower.includes('events')) {
+      specificDetail = 'table "public.events"';
+    } else if (lower.includes('contact_inquiries')) {
+      specificDetail = 'table "public.contact_inquiries"';
+    } else if (lower.includes('career_applications')) {
+      specificDetail = 'table "public.career_applications"';
+    } else if (rawMessage) {
+      specificDetail = `schema requirement (${rawMessage})`;
+    }
+
+    const message = specificDetail
+      ? `Database setup required: Supabase ${specificDetail} was not found. Please apply the migration scripts (20261025000001, 20261025000002, and 20261027000003) in your Supabase SQL Editor.`
+      : 'Required Supabase RBAC tables or columns were not found. Apply migrations 20261025000001, 20261025000002, and 20261027000003 in your Supabase SQL Editor.';
+
+    return new AppServiceError(message, 'schema_missing', code);
   }
 
   if (code === '23505' || lower.includes('duplicate key')) {
@@ -1413,3 +1470,283 @@ export async function updateAdminApplicationStatus(
   }
   return data as CareerApplicationRecord;
 }
+
+// ----------------------------------------------------------------------------
+// Event Participation (5-minute self-withdrawal rule & participant listing)
+// ----------------------------------------------------------------------------
+
+// ----------------------------------------------------------------------------
+// Event Participation (Free Local File & Direct Server Workflow - Zero Supabase Needed)
+// ----------------------------------------------------------------------------
+
+const LOCAL_STORAGE_KEY_PARTICIPANTS = 'aiconekt_local_participants';
+
+function getLocalStoredParticipants(): EventParticipantRecord[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY_PARTICIPANTS);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function saveLocalStoredParticipants(list: EventParticipantRecord[]) {
+  try {
+    localStorage.setItem(LOCAL_STORAGE_KEY_PARTICIPANTS, JSON.stringify(list));
+  } catch {
+    // ignore
+  }
+}
+
+export async function fetchEventParticipants(eventId: string): Promise<EventParticipantRecord[]> {
+  try {
+    const res = await fetch(`/api/events/participants?event_id=${encodeURIComponent(eventId)}`);
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const data = await res.json();
+      if (Array.isArray(data)) return data;
+    }
+  } catch {
+    // fallback to localStorage
+  }
+  return getLocalStoredParticipants().filter((p) => p.event_id === eventId);
+}
+
+export async function fetchAllEventParticipants(): Promise<EventParticipantRecord[]> {
+  try {
+    const res = await fetch('/api/events/participants');
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const data = await res.json();
+      if (Array.isArray(data)) return data;
+    }
+  } catch {
+    // fallback to localStorage
+  }
+  return getLocalStoredParticipants();
+}
+
+export async function registerEventInterest(input: {
+  event_id: string;
+  event_title?: string;
+  user_id?: string | null;
+  full_name: string;
+  email: string;
+  phone?: string | null;
+  college?: string | null;
+  branch?: string | null;
+  roll_number?: string | null;
+}): Promise<EventParticipantRecord> {
+  const payload = {
+    event_id: input.event_id,
+    event_title: input.event_title || 'AICONEKT Event',
+    name: input.full_name,
+    email: input.email.toLowerCase(),
+    phone: input.phone || null,
+    college: input.college || null,
+    branch: input.branch || null,
+    roll_number: input.roll_number || null,
+  };
+
+  try {
+    const res = await fetch('/api/events/participate', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+
+    const contentType = res.headers.get('content-type') || '';
+    if (res.ok && contentType.includes('application/json')) {
+      const json = await res.json();
+      return json.participant as EventParticipantRecord;
+    }
+
+    // If server responded with a deliberate JSON error (e.g. 400 validation or duplicate check)
+    if (contentType.includes('application/json')) {
+      const errJson = await res.json().catch(() => ({}));
+      if (res.status === 400 && errJson.error?.includes('already registered')) {
+        throw new AppServiceError(errJson.error, 'duplicate');
+      }
+      if (errJson.error) {
+        throw new AppServiceError(errJson.error, 'database');
+      }
+    }
+
+    // If response was not JSON (e.g. 404 HTML fallback from Vite dev server / GitHub Pages), fall through to localStorage fallback
+  } catch (err: any) {
+    if (err instanceof AppServiceError) throw err;
+    // Network errors or non-JSON errors proceed to local storage fallback
+  }
+
+  // Direct Browser Client Storage (Always works for free without backend / Supabase)
+  const list = getLocalStoredParticipants();
+  const existing = list.find(
+    (p) => p.event_id === input.event_id && p.email?.toLowerCase() === input.email.toLowerCase()
+  );
+  if (existing) {
+    throw new AppServiceError('You have already registered your interest for this event with this email.', 'duplicate');
+  }
+
+  const newRecord: EventParticipantRecord = {
+    id: 'reg_' + Date.now() + '_' + Math.random().toString(36).substring(2, 8),
+    event_id: input.event_id,
+    event_title: input.event_title || 'AICONEKT Event',
+    full_name: input.full_name,
+    email: input.email.toLowerCase(),
+    phone: input.phone || null,
+    college: input.college || null,
+    branch: input.branch || null,
+    roll_number: input.roll_number || null,
+    created_at: new Date().toISOString(),
+    status: 'registered',
+  };
+
+  list.unshift(newRecord);
+  saveLocalStoredParticipants(list);
+  return newRecord;
+}
+
+export async function adminRemoveParticipant(participationId: string): Promise<void> {
+  try {
+    await fetch(`/api/events/participants/${encodeURIComponent(participationId)}`, {
+      method: 'DELETE',
+    });
+  } catch {
+    // fallback
+  }
+
+  const list = getLocalStoredParticipants().filter((p) => p.id !== participationId);
+  saveLocalStoredParticipants(list);
+}
+
+// ----------------------------------------------------------------------------
+// Team Roster & Team Lead Management
+// ----------------------------------------------------------------------------
+
+export async function fetchTeamMembers(): Promise<TeamMemberRecord[]> {
+  const client = requireClient();
+  const { data, error } = await client
+    .from('team_members')
+    .select('*')
+    .order('display_order', { ascending: true })
+    .order('full_name', { ascending: true });
+
+  if (error) {
+    console.warn('Could not fetch team members from Supabase, using mock fallback:', error.message);
+    // Return fallback initial team roster
+    return [
+      {
+        id: 'tm-1',
+        user_id: null,
+        full_name: 'KOLLOJU RAVI CHARAN',
+        email: 'ravicharan@aiconekt.org',
+        role_title: 'Founder & Chief Executive Officer',
+        department: 'Executive Council',
+        is_lead: true,
+        lead_id: null,
+        bio: 'Leading strategic vision, organizational architecture, and cross-disciplinary innovation at AICONEKT TECHNOLOGIES.',
+        avatar_url: null,
+        github_url: 'https://github.com/Aiconekttechnologies',
+        linkedin_url: 'https://linkedin.com/company/aiconekt',
+        portfolio_url: null,
+        is_active: true,
+        display_order: 1,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+      {
+        id: 'tm-2',
+        user_id: null,
+        full_name: 'VOORE YASHWANTH',
+        email: 'yashwanth@aiconekt.org',
+        role_title: 'Co-Founder & Chief Manager',
+        department: 'Software & Web Development',
+        is_lead: true,
+        lead_id: null,
+        bio: 'Directing engineering operations, full-stack systems infrastructure, and technical initiatives.',
+        avatar_url: null,
+        github_url: 'https://github.com/Aiconekttechnologies',
+        linkedin_url: 'https://linkedin.com/company/aiconekt',
+        portfolio_url: null,
+        is_active: true,
+        display_order: 2,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      },
+    ];
+  }
+  return (data || []) as TeamMemberRecord[];
+}
+
+export async function createTeamMember(input: {
+  full_name: string;
+  email: string;
+  role_title: string;
+  department: string;
+  is_lead: boolean;
+  lead_id?: string | null;
+  bio?: string | null;
+  avatar_url?: string | null;
+  github_url?: string | null;
+  linkedin_url?: string | null;
+  portfolio_url?: string | null;
+}): Promise<TeamMemberRecord> {
+  const client = requireClient();
+  const { data, error } = await client
+    .from('team_members')
+    .insert({
+      full_name: input.full_name.trim(),
+      email: input.email.trim().toLowerCase(),
+      role_title: input.role_title.trim(),
+      department: input.department.trim(),
+      is_lead: input.is_lead,
+      lead_id: input.lead_id || null,
+      bio: input.bio?.trim() || null,
+      avatar_url: input.avatar_url?.trim() || null,
+      github_url: input.github_url?.trim() || null,
+      linkedin_url: input.linkedin_url?.trim() || null,
+      portfolio_url: input.portfolio_url?.trim() || null,
+      is_active: true,
+    })
+    .select('*')
+    .single();
+
+  if (error) {
+    throw translateSupabaseError(error, 'Failed to create team member.');
+  }
+  return data as TeamMemberRecord;
+}
+
+export async function updateTeamMember(
+  id: string,
+  updates: Partial<Omit<TeamMemberRecord, 'id' | 'created_at' | 'updated_at'>>
+): Promise<TeamMemberRecord> {
+  const client = requireClient();
+  const { data, error } = await client
+    .from('team_members')
+    .update({
+      ...updates,
+      updated_at: new Date().toISOString(),
+    })
+    .eq('id', id)
+    .select('*')
+    .single();
+
+  if (error) {
+    throw translateSupabaseError(error, 'Failed to update team member.');
+  }
+  return data as TeamMemberRecord;
+}
+
+export async function deleteTeamMember(id: string): Promise<void> {
+  const client = requireClient();
+  const { error } = await client
+    .from('team_members')
+    .delete()
+    .eq('id', id);
+
+  if (error) {
+    throw translateSupabaseError(error, 'Failed to delete team member.');
+  }
+}
+

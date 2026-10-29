@@ -66,7 +66,7 @@ export const ProjectsSection: React.FC = () => {
       : projects.filter((p) => p.category === selectedCategory);
 
   return (
-    <section id="projects" className="py-24 bg-[#030712] relative min-h-screen">
+    <section id="projects" className="py-24 bg-transparent relative min-h-screen">
       {/* Background Decor */}
       <div className="absolute top-1/3 left-0 w-80 h-80 bg-blue-900/10 blur-[130px] pointer-events-none" />
       <div className="absolute bottom-20 right-10 w-96 h-96 bg-cyan-900/10 blur-[140px] pointer-events-none" />

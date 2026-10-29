@@ -47,7 +47,7 @@ export const ContactSection: React.FC = () => {
   };
 
   return (
-    <section id="contact" className="py-24 bg-[#030712] relative min-h-screen">
+    <section id="contact" className="py-24 bg-transparent relative min-h-screen">
       {/* Background Ambience */}
       <div className="absolute top-1/3 right-1/4 w-96 h-96 bg-cyan-900/10 blur-[140px] pointer-events-none" />
 
